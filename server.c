@@ -12,9 +12,13 @@
 #include <linux/can/raw.h>
 
 #include <net/if.h>
+#include <arpa/inet.h>
+
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 
+//#include <ifaddrs.h>
 
 #include "./ini.h"
 
@@ -34,21 +38,18 @@ typedef struct main_config
         const char* login;
         const char* passwd;
         int port;
-    } mqtt_server;
+        const char* topicSub;
+        const char* topicPub;
+        const char* topicSystem;
+    } mqttConfig;
 
     struct
     {
-        const char* sub;
-        const char* pub;
-        const char* system;
-    } mqtt_topic;
-
-
-
-    struct
-    {
-        const char* interface;
-    } can_config;
+        const char* interfaceCan;
+        const char* interfaceLan;
+        const char* address;
+        int port;//temporary ONLY FOR STARTUP ssh port
+    } systemConfig;
 };
 
 
@@ -82,8 +83,10 @@ pthread_t thread;
 
 
 char topic[200];
+char tmpString[200];
 
 char macAddress[18];
+char ipAddress[15];
 char dataSend[3];//max value text byte
 
 static int handlerIni(void* user, const char* section, const char* name,
@@ -94,30 +97,25 @@ static int handlerIni(void* user, const char* section, const char* name,
      #define MATCH(s, n) strcmp(section, s) == 0 && strcmp(name, n) == 0
 
 
-    if (MATCH("server", "port")) {
-        pconfig->mqtt_server.port = atoi(value);
-    } else if (MATCH("server", "host")) {
-        pconfig->mqtt_server.host = strdup(value);
-    } else if (MATCH("server", "login")) {
-        pconfig->mqtt_server.login = strdup(value);
-    } else if (MATCH("server", "passwd")) {
-        pconfig->mqtt_server.passwd = strdup(value);
-    } else if (MATCH("can", "name")) {
-        pconfig->can_config.interface = strdup(value);
-    }else {
+    if (MATCH("mqtt", "port")) {
+        pconfig->mqttConfig.port = atoi(value);
+    } else if (MATCH("mqtt", "host")) {
+        pconfig->mqttConfig.host = strdup(value);
+    } else if (MATCH("mqtt", "login")) {
+        pconfig->mqttConfig.login = strdup(value);
+    } else if (MATCH("mqtt", "passwd")) {
+        pconfig->mqttConfig.passwd = strdup(value);
+    } else if (MATCH("system", "can")) {
+        pconfig->systemConfig.interfaceCan = strdup(value);
+    } else if (MATCH("system", "lan")) {
+        pconfig->systemConfig.interfaceLan = strdup(value);
+    }if (MATCH("system", "port")) {
+        pconfig->systemConfig.port = atoi(value);
+    } else {
         return 0;  /* unknown section/name, error */
     }
     return 1;
 }
-
-
-
-
-
-
-
-
-
 
 
 
@@ -127,17 +125,29 @@ static int handlerIni(void* user, const char* section, const char* name,
 // }
 
 
+void sendError(char *message){
+    sprintf(tmpString, "%s/system/error", mainConfig.mqttConfig.login);
+    mosquitto_publish(mosq, NULL,tmpString, strlen(message), message, 2, false);
+}
+
+
+
+
+
 void on_connect(struct mosquitto *mosq, void *obj, int rc)
 {
     if (rc != MOSQ_ERR_SUCCESS){
         mosquitto_disconnect(mosq);
-        printf("Login Passwd ERROR\n");
-        printf("MQTT DISCONNECT ...... !!!\n");
+        //printf("Login Passwd ERROR\n");
+        //printf("MQTT DISCONNECT ...... !!!\n");
     } else {
-        printf("Mosquitto connect ...... !!!\n");
-        //printf("%s\n", mainConfig.mqtt_topic.sub);
-        mosquitto_subscribe(mosq, NULL, mainConfig.mqtt_topic.sub, 1);
-        mosquitto_subscribe(mosq, NULL, mainConfig.mqtt_topic.system, 1);
+        //printf("Mosquitto connect ...... !!!\n");
+
+        sprintf(tmpString, "%s/system/connect", mainConfig.mqttConfig.login);
+        mosquitto_publish(mosq, NULL, tmpString, strlen(ipAddress), ipAddress, 2, false);
+        
+        mosquitto_subscribe(mosq, NULL, mainConfig.mqttConfig.topicSub, 1);
+        mosquitto_subscribe(mosq, NULL, mainConfig.mqttConfig.topicSystem, 1);
     }
 
 }
@@ -163,23 +173,32 @@ void sendCanMessage(int canChannel, int payload)
 }
 
 
-void* createTunnelThread(void* threadData){
-    system("killall -9 ssh > /dev/null 2>&1");
-    system("ssh -NR 9999:localhost:80 gergard.ru > /dev/null 2>&1");
-    printf("thread\n");
-	pthread_exit(0);
+
+
+
+void destroyTunnel(){
+    system("killall ssh > /dev/null 2>&1");
+}
+
+
+
+void createTunnel(){
+    destroyTunnel();
+    sprintf(tmpString, "ssh -NR %i:localhost:80 gergard.ru > /dev/null 2>&1 &", mainConfig.systemConfig.port);
+    system(tmpString);
 }
 
 
 
 
 void systemCommand(char *commandText) {
-    if (thread){
-        if (pthread_kill(thread,0)) pthread_create(&thread, NULL, createTunnelThread, NULL);
-    } else {
-        pthread_create(&thread, NULL, createTunnelThread, NULL);
-    }
     
+    if (strcmp(commandText, "open") == 0)    {
+        createTunnel();
+    }
+    if (strcmp(commandText, "close") == 0)    {
+        destroyTunnel();
+    }
 
 }
 
@@ -189,24 +208,25 @@ void systemCommand(char *commandText) {
 void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_message *msg)
 {
     int canChannel, payload;
-    char * canChannelText;
-    
-    char *topicParse[5];
-    
-    topicParse[0] = strtok(msg->topic, "/");
+    char *canChannelText;
+    char *topicParse[3];
+        
+    strcpy(tmpString, msg->topic);
+
+    topicParse[0] = strtok(tmpString, "/");
     topicParse[1] = strtok(NULL, "/");
     topicParse[2] = strtok(NULL, "/");
-    topicParse[3] = strtok(NULL, "/");
 
     if (strcmp(topicParse[1], "system") == 0){
         systemCommand(topicParse[2]);
-        // open ssh tunnel
-        printf("system\n");
     } else {
+        
         if(strcmp(topicParse[1], "channel") == 0){
+            
             canChannel = (int)strtol(topicParse[2], NULL, 16);
             payload = atoi(msg->payload);
-            if (canChannel && payload)
+    
+            if (canChannel)
             {
                 sendCanMessage(canChannel, payload);
             }
@@ -239,12 +259,12 @@ int initCan()
 	    return 1;
 	}
 
-	strcpy(ifr.ifr_name, mainConfig.can_config.interface);
+	strcpy(ifr.ifr_name, mainConfig.systemConfig.interfaceCan);
 
     if (ioctl(socketCan, SIOCGIFINDEX, &ifr) < 0) {
-        printf("Interface %s ", mainConfig.can_config.interface);
-        perror("Error: ");
-        return 1;
+        //printf("Interface %s ", mainConfig.systemConfig.interfaceCan);
+        //perror("Error: ");
+        return 2;
     }
 	
 	memset(&addr, 0, sizeof(addr));
@@ -252,8 +272,8 @@ int initCan()
 	addr.can_ifindex = ifr.ifr_ifindex;
 
 	if (bind(socketCan, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-	    perror("Bind");
-	    return 1;
+	    //perror("Bind");
+	    return 3;
 	}
 
 
@@ -269,8 +289,8 @@ void sendChannelStatus(__u8 headNumber, const __u32 *currentStatus, const __u32 
         for (int i = 0; i < 32; i++){
             if (((*needUpdate >> i) & 1)){
                 channel = 0x10 * (headNumber * 2 -1) + i;
-                sprintf(topic,"%s/0x%X", mainConfig.mqtt_topic.pub, channel);
-                printf("Topic %s\n", topic);
+                sprintf(topic,"%s/0x%X", mainConfig.mqttConfig.topicPub, channel);
+                //printf("Topic %s\n", topic);
                 sprintf(dataSend, "%i", ((*currentStatus >> i) & 1));
                 mosquitto_publish(mosq, NULL, topic, 1, dataSend, 2, false);
             }
@@ -284,7 +304,7 @@ void on_can_message(const struct can_frame *receivedFrame)
 {
     __u32 currentTime; 
     __u8 headIndex;
-
+    
     headIndex = receivedFrame->data[0] - 1;
     currentTime = time(NULL);
 
@@ -327,26 +347,39 @@ void startFork()
 
 
 
-void getMacAddress()
+void getIpAddr()
 {
-    char topicTmp[200];
-    FILE *fp;
-    fp = fopen("/sys/class/net/enp2s0/address","r");
-    if (!fp){
-        printf("Can't get MAC address\n");
-        exit(1);
-    }
-    fgets(macAddress, 18, fp);
-    fclose(fp);
-    
-    sprintf(topicTmp, "%s/channel/+", macAddress);
-    mainConfig.mqtt_topic.sub = strdup(topicTmp);
+    int fdIp;
+    struct ifreq ifrIp;
 
-    sprintf(topicTmp, "%s/system/+", macAddress);
-    mainConfig.mqtt_topic.system = strdup(topicTmp);
+    fdIp = socket(AF_INET, SOCK_DGRAM, 0);
 
-    sprintf(topicTmp, "%s/channelStatus", macAddress);
-    mainConfig.mqtt_topic.pub = strdup(topicTmp);
+    ifrIp.ifr_addr.sa_family = AF_INET;
+
+    strcpy(ifrIp.ifr_name, mainConfig.systemConfig.interfaceLan);
+
+    ioctl(fdIp, SIOCGIFADDR, &ifrIp);
+
+    close(fdIp);
+    strcpy(ipAddress, inet_ntoa(((struct sockaddr_in *)&ifrIp.ifr_addr)->sin_addr));
+
+}
+
+
+
+
+
+
+void generateTopic()
+{
+    sprintf(tmpString, "%s/channel/+", mainConfig.mqttConfig.login);
+    mainConfig.mqttConfig.topicSub = strdup(tmpString);
+
+    sprintf(tmpString, "%s/system/+", mainConfig.mqttConfig.login);
+    mainConfig.mqttConfig.topicSystem = strdup(tmpString);
+
+    sprintf(tmpString, "%s/channelStatus", mainConfig.mqttConfig.login);
+    mainConfig.mqttConfig.topicPub = strdup(tmpString);
 
 }
 
@@ -357,17 +390,9 @@ void getMacAddress()
 
 void setup(void)
 {
-
- getMacAddress();
-
-
-
+    generateTopic();
+    getIpAddr();
 }
-
-
-
-
-
 
 
 int main(int argc, char* argv[])
@@ -376,39 +401,51 @@ int main(int argc, char* argv[])
       
     //startFork();
 
+      
 
+    if (ini_parse("./config.ini", handlerIni, &mainConfig) < 0) {
+        //printf("Can't load 'test.ini'\n");
+        return 1;
+    }
 
     setup();
 
-    if (ini_parse("./config.ini", handlerIni, &mainConfig) < 0) {
-        printf("Can't load 'test.ini'\n");
-        return 1;
-    }
-
-
-    if ( initCan(&ifr)) {
-        return 1;
-    }
-
-    
+        
     mosquitto_lib_init();
     mosq = mosquitto_new(NULL, true, NULL);
 
     mosquitto_connect_callback_set(mosq, on_connect);
     //mosquitto_disconnect_callback_set(mosq, on_disconnect);
     mosquitto_message_callback_set(mosq, on_message);
-    rc = mosquitto_username_pw_set(mosq, mainConfig.mqtt_server.login, mainConfig.mqtt_server.passwd);
+    rc = mosquitto_username_pw_set(mosq, mainConfig.mqttConfig.login, mainConfig.mqttConfig.passwd);
     
-    rc = mosquitto_connect(mosq, mainConfig.mqtt_server.host, mainConfig.mqtt_server.port, 60);
+    //rc = mosquitto_connect(mosq, mainConfig.mqttConfig.host, mainConfig.mqttConfig.port, 60);
 
-    if (rc) {
-        printf("Server  ERROR\n");
-        return 0;
+    while (mosquitto_connect(mosq, mainConfig.mqttConfig.host, mainConfig.mqttConfig.port, 60)){
+        //printf("try connect mqtt \n");
+        sleep(10);
     }
+
+
+
+    // if (rc) {
+    //     printf("Server  ERROR\n");
+    //     return 0;
+    // }
 
     //mosquitto_loop_forever(mosq, -1, 1);
     mosquitto_loop_start(mosq);
-    
+
+     if ( initCan(&ifr)) {
+        for(;;){
+            sendError("Error CAN");
+            sleep(10);
+        }
+         
+     }
+
+
+
     int tmpValue = 0;
     // command for test "cansend can0 0f1#00"
     for(;;){
@@ -425,3 +462,4 @@ int main(int argc, char* argv[])
 
     return 0;
 }
+
