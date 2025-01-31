@@ -18,8 +18,6 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-//#include <ifaddrs.h>
-
 #include "./ini.h"
 
 
@@ -119,6 +117,27 @@ static int handlerIni(void* user, const char* section, const char* name,
 
 
 
+void getIpAddr()
+{
+    int fdIp;
+    struct ifreq ifrIp;
+
+    fdIp = socket(AF_INET, SOCK_DGRAM, 0);
+
+    ifrIp.ifr_addr.sa_family = AF_INET;
+
+    strcpy(ifrIp.ifr_name, mainConfig.systemConfig.interfaceLan);
+
+    ioctl(fdIp, SIOCGIFADDR, &ifrIp);
+
+    close(fdIp);
+    strcpy(ipAddress, inet_ntoa(((struct sockaddr_in *)&ifrIp.ifr_addr)->sin_addr));
+
+}
+
+
+
+
 // void on_disconnect(struct mosquitto *mosq, void *obj, int rc)
 // {
 //     printf("Mosquitto disconnect ...... !!!\n");
@@ -129,6 +148,15 @@ void sendError(char *message){
     sprintf(tmpString, "%s/system/error", mainConfig.mqttConfig.login);
     mosquitto_publish(mosq, NULL,tmpString, strlen(message), message, 2, false);
 }
+
+
+
+void sendIpAddress(){
+    getIpAddr();
+    sprintf(tmpString, "%s/info/connect", mainConfig.mqttConfig.login);
+    mosquitto_publish(mosq, NULL, tmpString, strlen(ipAddress), ipAddress, 2, false);
+}
+
 
 
 
@@ -143,8 +171,7 @@ void on_connect(struct mosquitto *mosq, void *obj, int rc)
     } else {
         //printf("Mosquitto connect ...... !!!\n");
 
-        sprintf(tmpString, "%s/system/connect", mainConfig.mqttConfig.login);
-        mosquitto_publish(mosq, NULL, tmpString, strlen(ipAddress), ipAddress, 2, false);
+        sendIpAddress();
         
         mosquitto_subscribe(mosq, NULL, mainConfig.mqttConfig.topicSub, 1);
         mosquitto_subscribe(mosq, NULL, mainConfig.mqttConfig.topicSystem, 1);
@@ -155,14 +182,22 @@ void on_connect(struct mosquitto *mosq, void *obj, int rc)
 
 
 
+
+
+
+
+
 // send message from mqtt to can
 void sendCanMessage(int canChannel, int payload)
 {
-    __u8 headNumber, bitNumber, value;
+    __u8 headNumber, bitNumber, value, headIndex;
 
     headNumber = (int)(canChannel + 16) / 32;
+    headIndex = headNumber - 1;
     bitNumber = canChannel - (headNumber * 2 - 1) * 16;
-    bitSet(needUpdate[headNumber],bitNumber);
+    
+    bitSet(needUpdate[headIndex], bitNumber);
+    
     if (canChannel > 15 && canChannel < 240){
         frame.can_id =canChannel;
         frame.can_dlc = 1;
@@ -174,8 +209,6 @@ void sendCanMessage(int canChannel, int payload)
 
 
 
-
-
 void destroyTunnel(){
     system("killall ssh > /dev/null 2>&1");
 }
@@ -184,8 +217,15 @@ void destroyTunnel(){
 
 void createTunnel(){
     destroyTunnel();
-    sprintf(tmpString, "ssh -NR %i:localhost:80 gergard.ru > /dev/null 2>&1 &", mainConfig.systemConfig.port);
+    sprintf(tmpString, "ssh -NR %i:localhost:22 rentdocument.ru -p 2323 -l %s -i /home/%s/.ssh/id_rsa > /dev/null 2>&1 &", mainConfig.systemConfig.port, mainConfig.mqttConfig.login, mainConfig.mqttConfig.login);
     system(tmpString);
+}
+
+
+
+
+void sendInfo(){
+
 }
 
 
@@ -199,6 +239,9 @@ void systemCommand(char *commandText) {
     if (strcmp(commandText, "close") == 0)    {
         destroyTunnel();
     }
+    if (strcmp(commandText, "info") == 0)    {
+        sendIpAddress();
+    }
 
 }
 
@@ -210,10 +253,8 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
     int canChannel, payload;
     char *canChannelText;
     char *topicParse[3];
-        
-    strcpy(tmpString, msg->topic);
 
-    topicParse[0] = strtok(tmpString, "/");
+    topicParse[0] = strtok(msg->topic, "/");
     topicParse[1] = strtok(NULL, "/");
     topicParse[2] = strtok(NULL, "/");
 
@@ -304,7 +345,6 @@ void on_can_message(const struct can_frame *receivedFrame)
 {
     __u32 currentTime; 
     __u8 headIndex;
-    
     headIndex = receivedFrame->data[0] - 1;
     currentTime = time(NULL);
 
@@ -320,7 +360,7 @@ void on_can_message(const struct can_frame *receivedFrame)
     }
 
     lastUpdateHead[headIndex] = currentTime;
-                
+                //printf("update %i\n",needUpdate[headIndex]);
     sendChannelStatus(headIndex + 1, &headChannelStatus[headIndex].channelstatus, &needUpdate[headIndex]);
     needUpdate[headIndex] = 0;
     prevHeadChannelStatus[headIndex] = headChannelStatus[headIndex].channelstatus;
@@ -342,31 +382,6 @@ void startFork()
     signal(SIGHUP, SIG_IGN);
    
 }
-
-
-
-
-
-void getIpAddr()
-{
-    int fdIp;
-    struct ifreq ifrIp;
-
-    fdIp = socket(AF_INET, SOCK_DGRAM, 0);
-
-    ifrIp.ifr_addr.sa_family = AF_INET;
-
-    strcpy(ifrIp.ifr_name, mainConfig.systemConfig.interfaceLan);
-
-    ioctl(fdIp, SIOCGIFADDR, &ifrIp);
-
-    close(fdIp);
-    strcpy(ipAddress, inet_ntoa(((struct sockaddr_in *)&ifrIp.ifr_addr)->sin_addr));
-
-}
-
-
-
 
 
 
@@ -399,11 +414,15 @@ int main(int argc, char* argv[])
 {
     int rc;
       
-    //startFork();
+    
+    if (argc == 1){
+        strcpy(tmpString, "./config.ini");
+    } else {
+        startFork();
+        strcpy(tmpString, argv[1]);
+    }
 
-      
-
-    if (ini_parse("./config.ini", handlerIni, &mainConfig) < 0) {
+    if (ini_parse(tmpString, handlerIni, &mainConfig) < 0) {
         //printf("Can't load 'test.ini'\n");
         return 1;
     }

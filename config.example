@@ -1,0 +1,12 @@
+[system]
+can = can0
+lan = enp2s0
+port = 9000
+
+[mqtt]
+host = ***
+port = 1883
+login = ***
+passwd = ***
+
+
