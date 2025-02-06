@@ -146,7 +146,19 @@ void getIpAddr()
 
 void sendError(char *message){
     sprintf(tmpString, "%s/system/error", mainConfig.mqttConfig.login);
-    mosquitto_publish(mosq, NULL,tmpString, strlen(message), message, 2, false);
+    mosquitto_publish(mosq, NULL,tmpString, strlen(message), message, 2, true);
+}
+
+
+
+
+void lastUpdate(){
+    char stringDateTime[100];
+    time_t t = time(NULL);
+    struct tm tm = *localtime(&t);
+    sprintf(stringDateTime, "%d-%02d-%02d %02d:%02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    sprintf(tmpString, "%s/info/update", mainConfig.mqttConfig.login);
+    mosquitto_publish(mosq, NULL, tmpString, strlen(stringDateTime), stringDateTime, 2, true);
 }
 
 
@@ -154,7 +166,8 @@ void sendError(char *message){
 void sendIpAddress(){
     getIpAddr();
     sprintf(tmpString, "%s/info/connect", mainConfig.mqttConfig.login);
-    mosquitto_publish(mosq, NULL, tmpString, strlen(ipAddress), ipAddress, 2, false);
+    mosquitto_publish(mosq, NULL, tmpString, strlen(ipAddress), ipAddress, 2, true);
+    lastUpdate();
 }
 
 
@@ -190,7 +203,7 @@ void on_connect(struct mosquitto *mosq, void *obj, int rc)
 // send message from mqtt to can
 void sendCanMessage(int canChannel, int payload)
 {
-    __u8 headNumber, bitNumber, value, headIndex;
+    __u8 headNumber, bitNumber, value, headIndex, writeResult;
 
     headNumber = (int)(canChannel + 16) / 32;
     headIndex = headNumber - 1;
@@ -202,7 +215,10 @@ void sendCanMessage(int canChannel, int payload)
         frame.can_id =canChannel;
         frame.can_dlc = 1;
         frame.data[0] = payload;
-        write(socketCan, &frame, sizeof(struct can_frame)) != sizeof(struct can_frame);
+        writeResult = write(socketCan, &frame, sizeof(struct can_frame)) != sizeof(struct can_frame);
+        if (writeResult == -1){
+            sendError("Error BUFFER CAN");
+        }
     }
 
 }
@@ -265,12 +281,11 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
         if(strcmp(topicParse[1], "channel") == 0){
             
             canChannel = (int)strtol(topicParse[2], NULL, 16);
-            payload = atoi(msg->payload);
-    
-            if (canChannel)
-            {
+            if (msg->payloadlen && canChannel){
+                payload = atoi(msg->payload);
                 sendCanMessage(canChannel, payload);
             }
+    
         }
     }
     
@@ -353,18 +368,17 @@ void on_can_message(const struct can_frame *receivedFrame)
     headChannelStatus[headIndex].byteStatus[2] = receivedFrame->data[3];
     headChannelStatus[headIndex].byteStatus[3] = receivedFrame->data[4];
 
-    if (currentTime - lastUpdateHead[headIndex] > 100){
+    if (currentTime - lastUpdateHead[headIndex] > 30){
         needUpdate[headIndex] = ~0u;
+        lastUpdateHead[headIndex] = currentTime;
     } else {
         differentStatus(&prevHeadChannelStatus[headIndex], &headChannelStatus[headIndex].channelstatus, &needUpdate[headIndex]);
     }
-
-    lastUpdateHead[headIndex] = currentTime;
                 //printf("update %i\n",needUpdate[headIndex]);
     sendChannelStatus(headIndex + 1, &headChannelStatus[headIndex].channelstatus, &needUpdate[headIndex]);
     needUpdate[headIndex] = 0;
     prevHeadChannelStatus[headIndex] = headChannelStatus[headIndex].channelstatus;
-
+    lastUpdate();
 }
 
 
@@ -446,13 +460,6 @@ int main(int argc, char* argv[])
     }
 
 
-
-    // if (rc) {
-    //     printf("Server  ERROR\n");
-    //     return 0;
-    // }
-
-    //mosquitto_loop_forever(mosq, -1, 1);
     mosquitto_loop_start(mosq);
 
      if ( initCan(&ifr)) {
@@ -460,7 +467,6 @@ int main(int argc, char* argv[])
             sendError("Error CAN");
             sleep(10);
         }
-         
      }
 
 
@@ -469,6 +475,7 @@ int main(int argc, char* argv[])
     // command for test "cansend can0 0f1#00"
     for(;;){
         read(socketCan, &frame, sizeof(struct can_frame));
+        
         if (frame.can_id == 0x100 && frame.can_dlc == 5){
             if (frame.data[0] && (frame.data[0] <= MAX_HEAD)){
                 on_can_message(&frame);
