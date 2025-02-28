@@ -23,8 +23,24 @@
 
 #define bitSet(value, bit) ((value) |= (1UL << (bit)))
 #define bitClear(value, bit) ((value) &= ~(1UL << (bit)))
+#define bitRead(value, bit) (((value) >> (bit)) & 0x01)
+
 
 #define MAX_HEAD 7
+
+#define OPI  0
+
+
+
+#if OPI
+    #include "./ledOPI.h"
+#else 
+    #include "./led.h"
+#endif
+
+
+
+
 
 
 
@@ -57,6 +73,10 @@ typedef union channel_status
     __u32 channelstatus;
     __u8 byteStatus[4];
 };
+
+
+
+__u8 errorLed = 0;
 
 
 struct mosquitto *mosq;
@@ -138,10 +158,11 @@ void getIpAddr()
 
 
 
-// void on_disconnect(struct mosquitto *mosq, void *obj, int rc)
-// {
-//     printf("Mosquitto disconnect ...... !!!\n");
-// }
+ void on_disconnect(struct mosquitto *mosq, void *obj, int rc)
+ {
+     bitClear(errorLed, 0);
+     showStatus(errorLed);
+ }
 
 
 void sendError(char *message){
@@ -153,12 +174,13 @@ void sendError(char *message){
 
 
 void lastUpdate(){
+    int mqttError;
     char stringDateTime[100];
     time_t t = time(NULL);
     struct tm tm = *localtime(&t);
     sprintf(stringDateTime, "%d-%02d-%02d %02d:%02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
     sprintf(tmpString, "%s/info/update", mainConfig.mqttConfig.login);
-    mosquitto_publish(mosq, NULL, tmpString, strlen(stringDateTime), stringDateTime, 2, true);
+    mqttError = mosquitto_publish(mosq, NULL, tmpString, strlen(stringDateTime), stringDateTime, 2, true);
 }
 
 
@@ -185,7 +207,8 @@ void on_connect(struct mosquitto *mosq, void *obj, int rc)
         //printf("Mosquitto connect ...... !!!\n");
 
         sendIpAddress();
-        
+        bitSet(errorLed, 0);
+        showStatus(errorLed);
         mosquitto_subscribe(mosq, NULL, mainConfig.mqttConfig.topicSub, 1);
         mosquitto_subscribe(mosq, NULL, mainConfig.mqttConfig.topicSystem, 1);
     }
@@ -227,6 +250,8 @@ void sendCanMessage(int canChannel, int payload)
 
 void destroyTunnel(){
     system("killall ssh > /dev/null 2>&1");
+    bitClear(errorLed, 6);
+    showStatus(errorLed);
 }
 
 
@@ -235,6 +260,8 @@ void createTunnel(){
     destroyTunnel();
     sprintf(tmpString, "ssh -NR %i:localhost:22 rentdocument.ru -p 2323 -l %s -i /home/%s/.ssh/id_rsa > /dev/null 2>&1 &", mainConfig.systemConfig.port, mainConfig.mqttConfig.login, mainConfig.mqttConfig.login);
     system(tmpString);
+    bitSet(errorLed, 6);
+    showStatus(errorLed);
 }
 
 
@@ -428,7 +455,9 @@ int main(int argc, char* argv[])
 {
     int rc;
       
-    
+    pinSetup();
+    clearShiftReg();
+
     if (argc == 1){
         strcpy(tmpString, "./config.ini");
     } else {
@@ -448,7 +477,7 @@ int main(int argc, char* argv[])
     mosq = mosquitto_new(NULL, true, NULL);
 
     mosquitto_connect_callback_set(mosq, on_connect);
-    //mosquitto_disconnect_callback_set(mosq, on_disconnect);
+    mosquitto_disconnect_callback_set(mosq, on_disconnect);
     mosquitto_message_callback_set(mosq, on_message);
     rc = mosquitto_username_pw_set(mosq, mainConfig.mqttConfig.login, mainConfig.mqttConfig.passwd);
     
